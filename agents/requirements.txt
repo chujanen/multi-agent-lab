@@ -1,0 +1,7 @@
+-c constraints.txt
+agent-framework-core==1.20.0
+agent-framework-foundry==1.13.1
+azure-ai-agentserver-core==2.2.0
+azure-ai-agentserver-responses==2.3.0
+azure-identity==1.26.0b2
+httpx==0.28.1

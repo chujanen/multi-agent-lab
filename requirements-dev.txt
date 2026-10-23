@@ -1,0 +1,8 @@
+-r agents/requirements.txt
+fastapi==0.159.1
+uvicorn==0.53.0
+PyJWT[crypto]==2.14.0
+msal==1.39.0
+python-dotenv==1.2.3
+pytest==9.1.1
+pytest-asyncio==1.4.0

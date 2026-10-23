@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multi-agent lab</title>
+<script src="https://alcdn.msauth.net/browser/2.38.2/js/msal-browser.min.js"></script>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 24px; color: #222; }
+  button { margin-right: 8px; padding: 6px 12px; }
+  table { border-collapse: collapse; margin-top: 12px; }
+  td, th { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+  .ok { background: #d4edda; } .bad { background: #f8d7da; } .na { background: #eee; }
+  #runs li { cursor: pointer; } #runs li.sel { font-weight: bold; }
+  code { font-size: 12px; }
+  .muted { color: #555; }
+  section.hop { border: 1px solid #ccc; border-left: 6px solid #ccc; padding: 8px 12px; margin: 12px 0; }
+  section.hop.ok { border-left-color: #28a745; } section.hop.bad { border-left-color: #dc3545; }
+  section.hop h3 { margin: 4px 0; font-size: 15px; }
+  .cols { display: grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap: 16px; }
+  .hbox h4 { margin: 6px 0; font-size: 13px; }
+  dl { margin: 0; font-family: ui-monospace, monospace; font-size: 12px; }
+  dt { color: #333; margin-top: 6px; } dd { margin: 0 0 0 12px; word-break: break-all; }
+  dd.absent { color: #999; } dd.ok { color: #1a7f37; font-weight: bold; } dd.bad { color: #b02a37; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>Multi-agent lab</h1>
+<div id="auth"><button id="login">Sign in</button></div>
+<div id="tests" hidden>
+  <p>Signed in as <span id="who"></span></p>
+  <button data-test="jwt">jwt</button>
+  <button data-test="obo">obo</button>
+  <button data-test="sp">sp</button>
+  <button data-test="model">model (uses the model)</button>
+  <span id="busy"></span>
+</div>
+<h2>Runs</h2>
+<ul id="runs"></ul>
+<div id="detail"></div>
+<script>
+const cfgP = fetch('/config').then(r => r.json());
+let msal, account;
+
+async function init() {
+  const cfg = await cfgP;
+  msal = new window.msal.PublicClientApplication({
+    auth: { clientId: cfg.webClientId, authority: 'https://login.microsoftonline.com/' + cfg.tenantId, redirectUri: location.origin + '/' },
+    cache: { cacheLocation: 'sessionStorage' },
+  });
+  account = msal.getAllAccounts()[0];
+  if (account) showSignedIn();
+  loadRuns();
+}
+
+async function token() {
+  const cfg = await cfgP;
+  const req = { scopes: [cfg.apiScope], account };
+  try { return (await msal.acquireTokenSilent(req)).accessToken; }
+  catch { return (await msal.acquireTokenPopup(req)).accessToken; }
+}
+
+function showSignedIn() {
+  document.getElementById('auth').hidden = true;
+  document.getElementById('tests').hidden = false;
+  document.getElementById('who').textContent = account.username;
+}
+
+document.getElementById('login').onclick = async () => {
+  const cfg = await cfgP;
+  account = (await msal.loginPopup({ scopes: [cfg.apiScope] })).account;
+  showSignedIn();
+};
+
+const testButtons = document.querySelectorAll('#tests button');
+testButtons.forEach(b => b.onclick = async () => {
+  const busy = document.getElementById('busy');
+  testButtons.forEach(x => x.disabled = true);
+  try {
+    busy.textContent = 'running ' + b.dataset.test + '…';
+    const r = await fetch('/runs', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + await token() }, body: JSON.stringify({ test: b.dataset.test }) });
+    busy.textContent = r.ok ? '' : 'error ' + r.status + ': ' + (await r.text());
+    if (r.ok) { const run = await r.json(); await loadRuns(); show(run); }
+  } catch (err) {
+    busy.textContent = 'error: ' + err.message;
+  } finally {
+    testButtons.forEach(x => x.disabled = false);
+  }
+});
+
+async function loadRuns() {
+  const runs = await (await fetch('/runs')).json();
+  const ul = document.getElementById('runs');
+  ul.innerHTML = '';
+  for (const run of runs) {
+    const li = document.createElement('li');
+    li.className = run.ok ? 'ok' : 'bad';
+    li.textContent = `${run.utc.slice(0, 19)}  ${run.test}  ${run.user.upn || run.user.oid}  ${run.ok ? 'PASS' : 'FAIL'}  trace ${run.traceId ? run.traceId.slice(0, 12) + '…' : '–'}`;
+    li.onclick = async () => show(await (await fetch('/runs/' + run.id)).json());
+    ul.appendChild(li);
+  }
+}
+
+function cell(v) {
+  const td = document.createElement('td');
+  if (v === null || v === undefined) { td.className = 'na'; td.textContent = '–'; }
+  else if (typeof v === 'boolean') { td.className = v ? 'ok' : 'bad'; td.textContent = v ? 'yes' : 'no'; }
+  else if (typeof v === 'object') { td.className = 'hdr'; td.textContent = Object.entries(v).map(([k, x]) => `${k.replace(/^x-(ms-|agent-)?/, '')}=${x === null ? '–' : x}`).join('\n'); }
+  else td.textContent = v;
+  return td;
+}
+
+function line(label, value, tag) {
+  const p = document.createElement('p');
+  p.textContent = label + ': ';
+  const v = document.createElement(tag);
+  v.textContent = value;           // model output and error codes are untrusted text, never markup
+  p.appendChild(v);
+  return p;
+}
+
+const AUTH_TEXT = {
+  jwt: 'browser → API: Entra v2 access token for the lab API (Authorization: Bearer …)',
+  obo: 'API → Orchestrator: on-behalf-of token for the signed-in user (Authorization: Bearer …)',
+  sp: 'API → Orchestrator: API service-principal token + x-ms-user-identity header',
+  'workload+x-ms-user-identity': 'Orchestrator → Specialist: agent workload token + x-ms-user-identity header',
+  workload: 'Orchestrator → Specialist: agent workload token, no user header',
+};
+const SHOW = ['x-ms-user-identity', 'x-agent-user-id', 'x-agent-foundry-call-id', 'traceparent', 'x-agent-session-id', 'x-agent-response-id', 'x-ms-client-request-id'];
+
+function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+
+function headerList(title, values, note) {
+  const box = el('div', undefined, 'hbox');
+  box.appendChild(el('h4', title));
+  if (note) box.appendChild(el('p', note, 'muted'));
+  if (values) {
+    const dl = el('dl');
+    for (const name of SHOW) {
+      const v = values[name];
+      dl.appendChild(el('dt', name));
+      dl.appendChild(el('dd', v === null || v === undefined ? '(absent)' : v, v === null || v === undefined ? 'absent' : ''));
+    }
+    box.appendChild(dl);
+  }
+  return box;
+}
+
+function contextBox(hop, run) {
+  const box = el('div', undefined, 'hbox');
+  box.appendChild(el('h4', `Request context the SDK gave ${hop.to}`));
+  const dl = el('dl');
+  const recv = hop.receivedHeaders || {};
+  if (hop.from === 'web') {
+    dl.appendChild(el('dt', 'validated JWT claim oid'));
+    dl.appendChild(el('dd', run.user.oid));
+    dl.appendChild(el('dt', 'upn'));
+    dl.appendChild(el('dd', run.user.upn || '(none)'));
+  } else {
+    dl.appendChild(el('dt', 'user_id  ← header x-agent-user-id'));
+    dl.appendChild(el('dd', hop.trustedUserId === null ? '(none)' : hop.trustedUserId, hop.trustedUserId === null ? 'absent' : ''));
+    dl.appendChild(el('dt', 'call_id  ← header x-agent-foundry-call-id'));
+    const cid = typeof hop.callId === 'string' ? hop.callId : (hop.callId ? (recv['x-agent-foundry-call-id'] || 'present') : '(none)');
+    dl.appendChild(el('dd', cid, cid === '(none)' ? 'absent' : ''));
+  }
+  dl.appendChild(el('dt', `user_id equals signed-in user (${run.user.oid.slice(0, 8)}…)`));
+  dl.appendChild(el('dd', hop.userMatch ? 'yes' : 'NO', hop.userMatch ? 'ok' : 'bad'));
+  box.appendChild(dl);
+  return box;
+}
+
+function show(run) {
+  const d = document.getElementById('detail');
+  d.innerHTML = '';
+  d.appendChild(el('h3', `${run.id} — ${run.ok ? 'PASS' : 'FAIL'}`));
+  d.appendChild(el('p', `Signed-in user oid ${run.user.oid} (${run.user.upn || ''}). A hop is green when the receiving container's SDK user_id equals that oid. The SDK reads user_id from the x-agent-user-id header and call_id from x-agent-foundry-call-id; both are minted by the Foundry ingress. Callers send x-ms-user-identity to ask the ingress to mint x-agent-user-id for that user. Authorization headers are never recorded.`, 'muted'));
+  if (run.traceId) {
+    const p = line('trace id', run.traceId, 'code');
+    cfgP.then(cfg => {
+      if (!cfg.traceSearchUrl) return;
+      const a = el('a', ' View in App Insights (paste the id into the search box)');
+      a.href = cfg.traceSearchUrl; a.target = '_blank'; a.rel = 'noopener';
+      p.appendChild(a);
+    });
+    d.appendChild(p);
+  }
+  if (run.error) d.appendChild(line('error', run.error, 'code'));
+  if (run.answer) d.appendChild(line('answer', run.answer, 'span'));
+  run.hops.forEach((h, i) => {
+    const card = el('section', undefined, 'hop ' + (h.ok && h.userMatch ? 'ok' : 'bad'));
+    card.appendChild(el('h3', `Hop ${i + 1}: ${h.from} → ${h.to}   ${h.ok && h.userMatch ? '✔ identity delivered' : h.ok ? '✘ identity NOT delivered' : '✘ call failed: ' + h.error}`));
+    card.appendChild(el('p', AUTH_TEXT[h.auth] || h.auth, 'muted'));
+    const cols = el('div', undefined, 'cols');
+    if (h.from === 'web') {
+      cols.appendChild(headerList(`Sent by ${h.from}`, null, 'Authorization: Bearer <Entra v2 token> (value not recorded)'));
+      cols.appendChild(headerList(`Received by ${h.to}`, null, 'Token verified: signature, aud, iss, exp, scp=access, oid'));
+    } else {
+      cols.appendChild(headerList(`Sent by ${h.from}`, h.sentHeaders, h.sentHeaders ? undefined : '(not recorded for this run)'));
+      cols.appendChild(headerList(`Received by ${h.to}`, h.receivedHeaders, h.receivedHeaders ? undefined : '(not recorded for this run)'));
+    }
+    cols.appendChild(contextBox(h, run));
+    card.appendChild(cols);
+    d.appendChild(card);
+  });
+}
+
+init();
+</script>
+</body>
+</html>
